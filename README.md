@@ -2,6 +2,8 @@
 
 A Home Assistant Lovelace card that shows upcoming departures from a Trafiklab timetable sensor.
 
+![card](/assets/preview.png)
+
 ## Features
 - Shows type, line, destination, time, minutes until departure, and status (on time / delayed / cancelled)
 - Shows the Platform/Stand/Bay where the service departures from or arrives to
