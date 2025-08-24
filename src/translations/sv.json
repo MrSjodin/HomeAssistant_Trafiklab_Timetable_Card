@@ -1,0 +1,39 @@
+{
+  "card": {
+    "title": "Trafiklab Tidtabell"
+  },
+  "error": {
+    "entity_not_found": "Enheten hittades inte: {entity}"
+  },
+  "empty": {
+    "no_upcoming": "Inga kommande avgångar"
+  },
+  "label": {
+    "platform": "Plattform {platform}",
+    "stand": "Läge {platform}",
+    "bay": "Brygga {platform}",
+    "now": "Nu",
+    "in_minutes": "om {minutes} min",
+    "updated": "Uppdaterad {time}",
+    "mode_bus": "Buss",
+    "mode_metro": "T-bana",
+    "mode_train": "Tåg",
+    "mode_tram": "Spårvagn",
+    "mode_taxi": "Taxi",
+    "mode_boat": "Båt"
+  },
+  "status": {
+    "cancelled": "Inställd",
+    "delayed": "Försenad {minutes} min",
+    "on_time": "I tid"
+  },
+  "editor": {
+    "sensor_entity": "Sensornamn",
+    "show_heading": "Visa rubrik (visningsnamn)",
+    "max_items": "Max antal",
+    "section_general": "Kortalternativ",
+    "help_sensor": "Välj Trafiklab-tidtabellens sensor.",
+    "help_show_heading": "Visa sensorns visningsnamn som kortets rubrik.",
+    "help_max_items": "Maximalt antal avgångar att visa."
+  }
+}
