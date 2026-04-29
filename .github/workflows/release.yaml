@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*.*.*'
 permissions:
@@ -25,6 +27,7 @@ jobs:
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
