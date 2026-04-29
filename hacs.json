@@ -1,6 +1,6 @@
 {
   "name": "Trafiklab Timetable Card",
-  "filename": "trafiklab-timetable-card.js",
+  "filename": "dist/trafiklab-timetable-card.js",
   "country": ["NO", "SE", "DK", "FI"],
   "render_readme": true
 }
