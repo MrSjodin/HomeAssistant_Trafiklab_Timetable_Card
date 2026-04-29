@@ -30,11 +30,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: trafiklab-timetable-card
-          path: dist
+          path: .
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/trafiklab-timetable-card.js
+          files: trafiklab-timetable-card.js
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
