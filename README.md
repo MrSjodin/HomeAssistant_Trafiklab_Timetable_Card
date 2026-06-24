@@ -19,7 +19,7 @@ A Home Assistant Lovelace card that shows upcoming departures from a Trafiklab t
 
 ### HACS (Recommended)
 1. Search for "Trafiklab Timetable Card" in HACS
-2. Install (prefferably the latest) version
+2. Install (preferably the latest) version
 3. Reload resources when prompted
 
 ### Manual
