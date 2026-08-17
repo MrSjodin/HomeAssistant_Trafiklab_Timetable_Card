@@ -22,6 +22,8 @@ A Home Assistant Lovelace card that shows upcoming departures from a Trafiklab t
 2. Install (preferably the latest) version
 3. Reload resources when prompted
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=MrSjodin&repository=HomeAssistant_Trafiklab_Timetable_Card&category=plugin)
+
 ### Manual
 1. Download `trafiklab-timetable-card.js` from the latest GitHub release.
 2. Copy it to `config/www/trafiklab-timetable-card/` on your HA instance.
