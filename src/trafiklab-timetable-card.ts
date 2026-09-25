@@ -42,6 +42,12 @@ declare global {
 
 const CARD_TYPE = 'trafiklab-timetable-card';
 
+// The integration refreshes roughly once a minute, but "in N min" has to keep
+// moving between those refreshes, so the card re-renders on its own clock too.
+// The display is minute-resolution, so this only has to be fine enough that a
+// row flips close to its boundary -- a per-second tick would buy nothing.
+const TICK_MS = 10_000;
+
 export class TrafiklabTimetableCard extends LitElement {
   private _hass!: HomeAssistant;
   set hass(hass: HomeAssistant) {
@@ -55,6 +61,40 @@ export class TrafiklabTimetableCard extends LitElement {
   // Dynamic overlay sizing
   private _overlayHeight = 0;
   private _overlayTop = 0;
+  private _ticker?: number;
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('visibilitychange', this._onVisibilityChange);
+    this._startTicker();
+  }
+
+  disconnectedCallback(): void {
+    document.removeEventListener('visibilitychange', this._onVisibilityChange);
+    this._stopTicker();
+    super.disconnectedCallback();
+  }
+
+  private _onVisibilityChange = (): void => {
+    if (document.hidden) this._stopTicker();
+    else {
+      // Catch up immediately; a backgrounded tab may have missed many ticks.
+      this.requestUpdate();
+      this._startTicker();
+    }
+  };
+
+  private _startTicker(): void {
+    if (this._ticker !== undefined || document.hidden) return;
+    this._ticker = window.setInterval(() => this.requestUpdate(), TICK_MS);
+  }
+
+  private _stopTicker(): void {
+    if (this._ticker !== undefined) {
+      clearInterval(this._ticker);
+      this._ticker = undefined;
+    }
+  }
 
   static getStubConfig(): Partial<TrafiklabTimetableCardConfig> {
     return { show_name: true, max_items: 5 };
@@ -174,6 +214,32 @@ export class TrafiklabTimetableCard extends LitElement {
     return { label: this._t('status.on_time'), badge: 'ok' };
   }
 
+  /**
+   * Minutes until a departure, derived from its absolute timestamp.
+   *
+   * `minutes_until` is only accurate at the moment the integration polled it.
+   * The integration refreshes about once a minute and floors the value, so the
+   * attribute can be a full minute stale by the time it is rendered -- and it
+   * sits on 0 for that whole minute, which reads as "leaving now" long after
+   * the departure has gone. `expected_time` is absolute, so it stays correct
+   * between polls.
+   *
+   * Falls back to the attribute when there is no usable timestamp.
+   */
+  private _minutesUntil(item: any): number | undefined {
+    const raw = item?.expected_time || item?.scheduled_time;
+    if (raw) {
+      const at = new Date(raw).getTime();
+      if (!Number.isNaN(at)) {
+        // Floor, not round: "in 8 min" must mean at least eight minutes.
+        // Clamp at 0 so a departure that has just gone reads "Now" rather
+        // than counting upwards into negative minutes.
+        return Math.max(0, Math.floor((at - Date.now()) / 60000));
+      }
+    }
+    return typeof item?.minutes_until === 'number' ? item.minutes_until : undefined;
+  }
+
   private _formatTimeString(item: any): string {
     if (item.time_formatted) return item.time_formatted;
     const t = item.expected_time || item.scheduled_time;
@@ -273,7 +339,7 @@ export class TrafiklabTimetableCard extends LitElement {
               ${departures.map((d) => {
                 const status = this._statusFor(d);
                 const time = this._formatTimeString(d);
-                const min = typeof d.minutes_until === 'number' ? d.minutes_until : undefined;
+                const min = this._minutesUntil(d);
                 const mode = this._modeLabel(d.transport_mode) ?? d.transport_mode;
                 const modeIcon = this._iconForMode(d.transport_mode);
                 const inLabel = min !== undefined ? (min === 0 ? this._t('label.now') : this._t('label.in_minutes', { minutes: min })) : undefined;
