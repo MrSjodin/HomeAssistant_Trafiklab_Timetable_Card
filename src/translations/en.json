@@ -43,6 +43,8 @@
     "unknown_stop": "Unknown stop",
     "departure": "Departs",
     "arrival": "Arrives",
+    "departed": "Departed",
+    "show_previous_stops": "Show previous stops",
     "time_unavailable": "Time unavailable"
   },
   "alert": {

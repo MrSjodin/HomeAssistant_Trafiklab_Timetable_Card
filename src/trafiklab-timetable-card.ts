@@ -92,11 +92,13 @@ export class TrafiklabTimetableCard extends LitElement {
   @state() private _tripDetails?: TripDetails;
   @state() private _selectedTrip?: any;
   @state() private _selectedAlertCall?: TripCall;
+  @state() private _showPastStops = false;
   private _tripRequestId = 0;
   // Dynamic overlay sizing
   private _overlayHeight = 0;
   private _overlayTop = 0;
   private _ticker?: number;
+  private _tripPollTimer?: number;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -107,15 +109,19 @@ export class TrafiklabTimetableCard extends LitElement {
   disconnectedCallback(): void {
     document.removeEventListener('visibilitychange', this._onVisibilityChange);
     this._stopTicker();
+    this._stopTripPolling();
     super.disconnectedCallback();
   }
 
   private _onVisibilityChange = (): void => {
-    if (document.hidden) this._stopTicker();
-    else {
+    if (document.hidden) {
+      this._stopTicker();
+      this._stopTripPolling();
+    } else {
       // Catch up immediately; a backgrounded tab may have missed many ticks.
       this.requestUpdate();
       this._startTicker();
+      if (this._detailsOpen) this._startTripPolling();
     }
   };
 
@@ -128,6 +134,18 @@ export class TrafiklabTimetableCard extends LitElement {
     if (this._ticker !== undefined) {
       clearInterval(this._ticker);
       this._ticker = undefined;
+    }
+  }
+
+  private _startTripPolling(): void {
+    if (this._tripPollTimer !== undefined || document.hidden) return;
+    this._tripPollTimer = window.setInterval(() => void this._refreshTripDetails(), TICK_MS);
+  }
+
+  private _stopTripPolling(): void {
+    if (this._tripPollTimer !== undefined) {
+      clearInterval(this._tripPollTimer);
+      this._tripPollTimer = undefined;
     }
   }
 
@@ -300,6 +318,19 @@ export class TrafiklabTimetableCard extends LitElement {
     }
   }
 
+  private async _fetchTripDetails(tripId: string, startDate: string): Promise<TripDetails> {
+    const result = await this.hass.callWS<Record<string, any>>({
+      type: 'call_service',
+      domain: 'trafiklab',
+      service: 'trip_details',
+      service_data: { trip_id: tripId, start_date: startDate },
+      return_response: true,
+    });
+    const response = result?.response ?? result;
+    if (!Array.isArray(response?.calls)) throw new Error('Invalid trip details response');
+    return response as TripDetails;
+  }
+
   private async _openTripDetails(item: any): Promise<void> {
     const requestId = ++this._tripRequestId;
     const tripId = item?.trip_id;
@@ -308,7 +339,9 @@ export class TrafiklabTimetableCard extends LitElement {
     this._tripDetails = undefined;
     this._tripError = undefined;
     this._alertOpen = false;
+    this._showPastStops = false;
     this._detailsOpen = true;
+    this._stopTripPolling();
 
     if (!tripId || !startDate) {
       this._tripLoading = false;
@@ -318,21 +351,29 @@ export class TrafiklabTimetableCard extends LitElement {
 
     this._tripLoading = true;
     try {
-      const result = await this.hass.callWS<Record<string, any>>({
-        type: 'call_service',
-        domain: 'trafiklab',
-        service: 'trip_details',
-        service_data: { trip_id: tripId, start_date: startDate },
-        return_response: true,
-      });
+      const details = await this._fetchTripDetails(tripId, startDate);
       if (requestId !== this._tripRequestId) return;
-      const response = result?.response ?? result;
-      if (!Array.isArray(response?.calls)) throw new Error('Invalid trip details response');
-      this._tripDetails = response as TripDetails;
+      this._tripDetails = details;
+      this._startTripPolling();
     } catch {
       if (requestId === this._tripRequestId) this._tripError = 'error.trip_details';
     } finally {
       if (requestId === this._tripRequestId) this._tripLoading = false;
+    }
+  }
+
+  // Quietly refetch trip details on an interval while the dialog is open; keeps
+  // the last known details on failure instead of surfacing a transient error.
+  private async _refreshTripDetails(): Promise<void> {
+    const requestId = this._tripRequestId;
+    const tripId = this._selectedTrip?.trip_id;
+    const startDate = this._selectedTrip?.trip_start_date;
+    if (!tripId || !startDate) return;
+    try {
+      const details = await this._fetchTripDetails(tripId, startDate);
+      if (requestId === this._tripRequestId) this._tripDetails = details;
+    } catch {
+      // Ignore transient background refresh failures.
     }
   }
 
@@ -352,6 +393,7 @@ export class TrafiklabTimetableCard extends LitElement {
 
   private _onDetailsDialogClose = (): void => {
     this._tripRequestId++;
+    this._stopTripPolling();
     this._detailsOpen = false;
     this._alertOpen = false;
     this._tripLoading = false;
@@ -359,6 +401,7 @@ export class TrafiklabTimetableCard extends LitElement {
     this._tripError = undefined;
     this._selectedTrip = undefined;
     this._selectedAlertCall = undefined;
+    this._showPastStops = false;
   };
 
   private _onAlertDialogClose = (): void => {
@@ -371,9 +414,9 @@ export class TrafiklabTimetableCard extends LitElement {
     this._alertOpen = true;
   }
 
-  private _visibleCalls(): TripCall[] {
+  private _startIndex(): number {
     const calls = this._tripDetails?.calls ?? [];
-    if (calls.length < 2) return calls;
+    if (calls.length < 2) return 0;
     const entity = this._getEntity();
     const item = this._selectedTrip;
     const areaId = item?.area_id ?? item?.stop?.area_id ?? entity?.attributes?.area_id ?? entity?.attributes?.stop_id;
@@ -397,7 +440,17 @@ export class TrafiklabTimetableCard extends LitElement {
         });
       }
     }
-    return calls.slice(startIndex >= 0 ? startIndex : 0);
+    return startIndex >= 0 ? startIndex : 0;
+  }
+
+  private _visibleCalls(): TripCall[] {
+    const calls = this._tripDetails?.calls ?? [];
+    if (this._showPastStops) return calls;
+    return calls.slice(this._startIndex());
+  }
+
+  private _showPastStopsToggle(): void {
+    this._showPastStops = true;
   }
 
   private _formatTripTime(value: string | undefined): string | undefined {
@@ -583,22 +636,38 @@ export class TrafiklabTimetableCard extends LitElement {
               ${this._visibleCalls().length === 0
                 ? html`<div class="dialog-state">${this._t('trip.no_stops')}</div>`
                 : html`<ol class="stop-list" aria-label=${this._t('trip.stops')}>
+                ${!this._showPastStops && this._startIndex() > 0
+                  ? html`<li class="stop-row past-toggle-row">
+                      <span class="stop-marker" aria-hidden="true"></span>
+                      <div class="stop-content past-toggle-content">
+                        <button class="past-toggle-button" type="button"
+                                aria-label=${this._t('trip.show_previous_stops')}
+                                title=${this._t('trip.show_previous_stops')}
+                                @click=${this._showPastStopsToggle}>
+                          <ha-icon .icon=${'mdi:dots-horizontal'}></ha-icon>
+                        </button>
+                      </div>
+                    </li>`
+                  : nothing}
                 ${this._visibleCalls().map((call, index, calls) => {
                   const finalStop = index === calls.length - 1;
+                  const isPast = this._showPastStops && index < this._startIndex();
                   const time = this._tripTime(call, finalStop);
                   const platform = this._tripPlatform(call);
                   const alerts = Array.isArray(call.alerts) ? call.alerts.filter((alert) => alert && (alert.title || alert.text)) : [];
-                  return html`<li class="stop-row">
+                  return html`<li class="stop-row ${isPast ? 'past' : ''}">
                     <span class="stop-marker" aria-hidden="true">
-                      ${call.is_realtime ? html`<span class="realtime-dots"><i></i><i></i><i></i></span>` : nothing}
+                      ${call.is_realtime && !isPast ? html`<ha-icon class="realtime-live" .icon=${'mdi:access-point'}></ha-icon>` : nothing}
                     </span>
                     <div class="stop-content">
                       <div class="stop-name">${call.stop?.name ?? this._t('trip.unknown_stop')}</div>
                       <div class="stop-meta">
-                        <span class="trip-time-label">${finalStop ? this._t('trip.arrival') : this._t('trip.departure')}</span>
-                        ${time.differs
-                          ? html`<span class="scheduled crossed-out">${time.scheduled}</span><span class="realtime-value">${time.realtime}</span>`
-                          : html`<span>${time.realtime ?? time.scheduled ?? this._t('trip.time_unavailable')}</span>`}
+                        <span class="trip-time-label">${isPast ? this._t('trip.departed') : finalStop ? this._t('trip.arrival') : this._t('trip.departure')}</span>
+                        ${isPast
+                          ? html`<span>${time.realtime ?? time.scheduled ?? this._t('trip.time_unavailable')}</span>`
+                          : time.differs
+                            ? html`<span class="scheduled crossed-out">${time.scheduled}</span><span class="realtime-value">${time.realtime}</span>`
+                            : html`<span>${time.realtime ?? time.scheduled ?? this._t('trip.time_unavailable')}</span>`}
                         ${platform.differs
                           ? html`<span class="platform-values"><span class="crossed-out">${platform.scheduled}</span><span>${this._t('label.platform', { platform: platform.realtime })}</span></span>`
                           : (platform.realtime ?? platform.scheduled)
@@ -763,6 +832,7 @@ export class TrafiklabTimetableCard extends LitElement {
     .stop-row:not(:last-child)::before { position: absolute; z-index: 0; top: 30px; bottom: -30px; left: 11px; width: 2px; background: var(--divider-color); content: ''; }
     .stop-marker { z-index: 1; display: grid; place-items: center; width: 24px; height: 24px; border: 2px solid var(--primary-color); border-radius: 50%; background: var(--card-background-color); }
     .stop-content { min-width: 0; padding: 9px 0; }
+    .stop-row.past { opacity: 0.6; }
     .stop-name { font-weight: 600; overflow-wrap: anywhere; }
     .stop-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 9px; margin-top: 3px; color: var(--secondary-text-color); font-size: 0.88em; }
     .trip-time-label { color: var(--primary-text-color); font-weight: 600; }
@@ -771,11 +841,13 @@ export class TrafiklabTimetableCard extends LitElement {
     .platform-values { display: inline-flex; gap: 6px; }
     .alert-button { color: var(--primary-color); }
     .alert-button ha-icon { --mdc-icon-size: 24px; }
-    .realtime-dots { display: flex; gap: 2px; }
-    .realtime-dots i { width: 3px; height: 3px; border-radius: 50%; background: var(--primary-color); animation: bounce 0.9s ease-in-out infinite alternate; }
-    .realtime-dots i:nth-child(2) { animation-delay: 0.15s; }
-    .realtime-dots i:nth-child(3) { animation-delay: 0.3s; }
-    @keyframes bounce { to { transform: translateY(-4px); opacity: 0.45; } }
+    .realtime-live { display: block; color: var(--primary-color); --mdc-icon-size: 16px; animation: pulse-live 1.6s ease-in-out infinite; }
+    @keyframes pulse-live { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.8); } }
+    .past-toggle-row { min-height: 40px; }
+    .past-toggle-content { display: flex; justify-content: center; padding: 4px 0; }
+    .past-toggle-button { display: inline-flex; align-items: center; justify-content: center; padding: 4px 18px; border: 0; border-radius: 999px; background: var(--secondary-background-color); color: var(--secondary-text-color); cursor: pointer; }
+    .past-toggle-button:hover { background: var(--divider-color); }
+    .past-toggle-button ha-icon { --mdc-icon-size: 20px; }
     .alert-dialog { width: min(480px, calc(100vw - 32px)); }
     .alert-list { max-height: min(60vh, 520px); padding: 6px 22px 20px; overflow: auto; }
     .alert-item { padding: 12px 0; border-bottom: 1px solid var(--divider-color); }

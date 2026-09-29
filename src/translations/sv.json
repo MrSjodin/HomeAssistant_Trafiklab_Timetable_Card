@@ -43,6 +43,8 @@
     "unknown_stop": "Okänd hållplats",
     "departure": "Avgår",
     "arrival": "Ankommer",
+    "departed": "Avgick",
+    "show_previous_stops": "Visa tidigare hållplatser",
     "time_unavailable": "Tid saknas"
   },
   "alert": {
