@@ -3,7 +3,9 @@
     "title": "Trafiklab Timetable"
   },
   "error": {
-    "entity_not_found": "Entity not found: {entity}"
+    "entity_not_found": "Entity not found: {entity}",
+    "trip_missing": "Trip details are unavailable because this departure is missing its trip identifier.",
+    "trip_details": "Couldn't load trip details. Check the integration and try again."
   },
   "empty": {
     "no_upcoming": "No upcoming departures"
@@ -15,6 +17,9 @@
     "now": "Now",
     "in_minutes": "in {minutes} min",
     "updated": "Updated {time}",
+    "trip_details_for": "Show details for line {line} to {destination}",
+    "close": "Close",
+    "retry": "Try again",
     "mode_bus": "Bus",
     "mode_metro": "Metro",
     "mode_train": "Train",
@@ -26,6 +31,23 @@
     "cancelled": "Cancelled",
     "delayed": "Delayed {minutes} min",
     "on_time": "On time"
+  },
+  "trip": {
+    "title": "Trip details",
+    "details": "Trip details",
+    "loading": "Loading route",
+    "origin_unknown": "Origin",
+    "destination_unknown": "Destination",
+    "stops": "Stops",
+    "no_stops": "No stop details are available for this trip.",
+    "unknown_stop": "Unknown stop",
+    "departure": "Departs",
+    "arrival": "Arrives",
+    "time_unavailable": "Time unavailable"
+  },
+  "alert": {
+    "heading": "Stop alert",
+    "button_for_stop": "Show alerts for {stop}"
   },
   "editor": {
     "sensor_entity": "Sensor entity",
