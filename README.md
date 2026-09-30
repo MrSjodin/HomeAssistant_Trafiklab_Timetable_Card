@@ -74,8 +74,11 @@ The card supports two formats:
 - Icons: Based on `transport_mode` (mdi icons).
 - Trip details: Calls `trafiklab.trip_details` on selection; requires integration 1.1.1+ and trip identifiers in the departure. Stop alerts from the service response appear under the affected stop and open in a dialog.
 
-## Accessibility
-- Header overlay and line pill are keyboard-activatable (Enter/Space) to open more-info.
+## All screenshots
+![card](/assets/preview.png) 
+![card](/assets/screenshot_v1.1.0_01.png) 
+![card](/assets/screenshot_v1.1.0_02.png) 
+![card](/assets/screenshot_v1.1.0_03.png)
 
 ## Development
 - Install deps: `npm ci`
