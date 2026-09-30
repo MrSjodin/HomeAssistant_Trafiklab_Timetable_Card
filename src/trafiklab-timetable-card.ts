@@ -17,11 +17,38 @@ type HassEntity = {
   attributes: Record<string, any>;
 };
 
+type TripAlert = {
+  title?: string;
+  text?: string;
+};
+
+type TripCall = {
+  stop?: { name?: string; area_id?: string; id?: string };
+  scheduledDeparture?: string;
+  realtimeDeparture?: string;
+  scheduledArrival?: string;
+  realtimeArrival?: string;
+  scheduled_platform?: { designation?: string } | null;
+  realtime_platform?: { designation?: string } | null;
+  alerts?: TripAlert[];
+  is_realtime?: boolean;
+};
+
+type TripDetails = {
+  line?: string;
+  transport_mode?: string;
+  headsign?: string;
+  origin?: string;
+  destination?: string;
+  calls: TripCall[];
+};
+
 type HomeAssistant = {
   states: Record<string, HassEntity>;
   formatEntityState?(entity: HassEntity): string;
   locale?: any;
   language?: string;
+  callWS<T>(message: Record<string, unknown>): Promise<T>;
 };
 
 export interface TrafiklabTimetableCardConfig {
@@ -58,10 +85,20 @@ export class TrafiklabTimetableCard extends LitElement {
     return this._hass;
   }
   @state() private _config?: TrafiklabTimetableCardConfig;
+  @state() private _detailsOpen = false;
+  @state() private _alertOpen = false;
+  @state() private _tripLoading = false;
+  @state() private _tripError?: 'error.trip_missing' | 'error.trip_details';
+  @state() private _tripDetails?: TripDetails;
+  @state() private _selectedTrip?: any;
+  @state() private _selectedAlertCall?: TripCall;
+  @state() private _showPastStops = false;
+  private _tripRequestId = 0;
   // Dynamic overlay sizing
   private _overlayHeight = 0;
   private _overlayTop = 0;
   private _ticker?: number;
+  private _tripPollTimer?: number;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -72,15 +109,19 @@ export class TrafiklabTimetableCard extends LitElement {
   disconnectedCallback(): void {
     document.removeEventListener('visibilitychange', this._onVisibilityChange);
     this._stopTicker();
+    this._stopTripPolling();
     super.disconnectedCallback();
   }
 
   private _onVisibilityChange = (): void => {
-    if (document.hidden) this._stopTicker();
-    else {
+    if (document.hidden) {
+      this._stopTicker();
+      this._stopTripPolling();
+    } else {
       // Catch up immediately; a backgrounded tab may have missed many ticks.
       this.requestUpdate();
       this._startTicker();
+      if (this._detailsOpen) this._startTripPolling();
     }
   };
 
@@ -93,6 +134,18 @@ export class TrafiklabTimetableCard extends LitElement {
     if (this._ticker !== undefined) {
       clearInterval(this._ticker);
       this._ticker = undefined;
+    }
+  }
+
+  private _startTripPolling(): void {
+    if (this._tripPollTimer !== undefined || document.hidden) return;
+    this._tripPollTimer = window.setInterval(() => void this._refreshTripDetails(), TICK_MS);
+  }
+
+  private _stopTripPolling(): void {
+    if (this._tripPollTimer !== undefined) {
+      clearInterval(this._tripPollTimer);
+      this._tripPollTimer = undefined;
     }
   }
 
@@ -161,6 +214,8 @@ export class TrafiklabTimetableCard extends LitElement {
       canceled: a.canceled,
       platform: a.platform,
       agency: a.agency,
+      trip_id: a.trip_id,
+      trip_start_date: a.trip_start_date,
     };
   }
 
@@ -263,6 +318,166 @@ export class TrafiklabTimetableCard extends LitElement {
     }
   }
 
+  private async _fetchTripDetails(tripId: string, startDate: string): Promise<TripDetails> {
+    const result = await this.hass.callWS<Record<string, any>>({
+      type: 'call_service',
+      domain: 'trafiklab',
+      service: 'trip_details',
+      service_data: { trip_id: tripId, start_date: startDate },
+      return_response: true,
+    });
+    const response = result?.response ?? result;
+    if (!Array.isArray(response?.calls)) throw new Error('Invalid trip details response');
+    return response as TripDetails;
+  }
+
+  private async _openTripDetails(item: any): Promise<void> {
+    const requestId = ++this._tripRequestId;
+    const tripId = item?.trip_id;
+    const startDate = item?.trip_start_date;
+    this._selectedTrip = item;
+    this._tripDetails = undefined;
+    this._tripError = undefined;
+    this._alertOpen = false;
+    this._showPastStops = false;
+    this._detailsOpen = true;
+    this._stopTripPolling();
+
+    if (!tripId || !startDate) {
+      this._tripLoading = false;
+      this._tripError = 'error.trip_missing';
+      return;
+    }
+
+    this._tripLoading = true;
+    try {
+      const details = await this._fetchTripDetails(tripId, startDate);
+      if (requestId !== this._tripRequestId) return;
+      this._tripDetails = details;
+      this._startTripPolling();
+    } catch {
+      if (requestId === this._tripRequestId) this._tripError = 'error.trip_details';
+    } finally {
+      if (requestId === this._tripRequestId) this._tripLoading = false;
+    }
+  }
+
+  // Quietly refetch trip details on an interval while the dialog is open; keeps
+  // the last known details on failure instead of surfacing a transient error.
+  private async _refreshTripDetails(): Promise<void> {
+    const requestId = this._tripRequestId;
+    const tripId = this._selectedTrip?.trip_id;
+    const startDate = this._selectedTrip?.trip_start_date;
+    if (!tripId || !startDate) return;
+    try {
+      const details = await this._fetchTripDetails(tripId, startDate);
+      if (requestId === this._tripRequestId) this._tripDetails = details;
+    } catch {
+      // Ignore transient background refresh failures.
+    }
+  }
+
+  private _retryTripDetails(): void {
+    if (this._selectedTrip) void this._openTripDetails(this._selectedTrip);
+  }
+
+  private _closeDetailsDialog(): void {
+    const dialog = this.renderRoot.querySelector<HTMLDialogElement>('#trip-details-dialog');
+    if (dialog?.open) dialog.close();
+  }
+
+  private _closeAlertDialog(): void {
+    const dialog = this.renderRoot.querySelector<HTMLDialogElement>('#stop-alert-dialog');
+    if (dialog?.open) dialog.close();
+  }
+
+  private _onDetailsDialogClose = (): void => {
+    this._tripRequestId++;
+    this._stopTripPolling();
+    this._detailsOpen = false;
+    this._alertOpen = false;
+    this._tripLoading = false;
+    this._tripDetails = undefined;
+    this._tripError = undefined;
+    this._selectedTrip = undefined;
+    this._selectedAlertCall = undefined;
+    this._showPastStops = false;
+  };
+
+  private _onAlertDialogClose = (): void => {
+    this._alertOpen = false;
+    this._selectedAlertCall = undefined;
+  };
+
+  private _openStopAlerts(call: TripCall): void {
+    this._selectedAlertCall = call;
+    this._alertOpen = true;
+  }
+
+  private _startIndex(): number {
+    const calls = this._tripDetails?.calls ?? [];
+    if (calls.length < 2) return 0;
+    const entity = this._getEntity();
+    const item = this._selectedTrip;
+    const areaId = item?.area_id ?? item?.stop?.area_id ?? entity?.attributes?.area_id ?? entity?.attributes?.stop_id;
+    let startIndex = areaId === undefined
+      ? -1
+      : calls.findIndex((call) => String(call.stop?.area_id ?? call.stop?.id) === String(areaId));
+    if (startIndex < 0) {
+      const selectedTimes = [item?.scheduled_time, item?.expected_time]
+        .map((time) => this._formatTripTime(time))
+        .filter((time): time is string => !!time);
+      const selectedPlatform = item?.platform ? String(item.platform) : undefined;
+      if (selectedTimes.length) {
+        startIndex = calls.findIndex((call) => {
+          const callTimes = [call.scheduledDeparture, call.realtimeDeparture, call.scheduledArrival, call.realtimeArrival]
+            .map((time) => this._formatTripTime(time))
+            .filter((time): time is string => !!time);
+          if (!selectedTimes.some((time) => callTimes.includes(time))) return false;
+          if (!selectedPlatform) return true;
+          const platforms = [call.scheduled_platform?.designation, call.realtime_platform?.designation];
+          return !platforms.some(Boolean) || platforms.includes(selectedPlatform);
+        });
+      }
+    }
+    return startIndex >= 0 ? startIndex : 0;
+  }
+
+  private _visibleCalls(): TripCall[] {
+    const calls = this._tripDetails?.calls ?? [];
+    if (this._showPastStops) return calls;
+    return calls.slice(this._startIndex());
+  }
+
+  private _showPastStopsToggle(): void {
+    this._showPastStops = true;
+  }
+
+  private _formatTripTime(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  private _tripTime(call: TripCall, finalStop: boolean): { scheduled?: string; realtime?: string; differs: boolean } {
+    const scheduledValue = finalStop
+      ? (call.scheduledArrival ?? call.scheduledDeparture)
+      : (call.scheduledDeparture ?? call.scheduledArrival);
+    const realtimeValue = finalStop
+      ? (call.realtimeArrival ?? call.realtimeDeparture)
+      : (call.realtimeDeparture ?? call.realtimeArrival);
+    const scheduled = this._formatTripTime(scheduledValue);
+    const realtime = call.is_realtime ? this._formatTripTime(realtimeValue) : undefined;
+    return { scheduled, realtime, differs: !!scheduled && !!realtime && scheduled !== realtime };
+  }
+
+  private _tripPlatform(call: TripCall): { scheduled?: string; realtime?: string; differs: boolean } {
+    const scheduled = call.scheduled_platform?.designation;
+    const realtime = call.is_realtime ? call.realtime_platform?.designation : undefined;
+    return { scheduled, realtime, differs: !!scheduled && !!realtime && scheduled !== realtime };
+  }
+
   private _openMoreInfo(): void {
     const entityId = this._config?.entity;
     if (!entityId) return;
@@ -283,6 +498,11 @@ export class TrafiklabTimetableCard extends LitElement {
   }
 
   protected updated(): void {
+    const detailsDialog = this.renderRoot.querySelector<HTMLDialogElement>('#trip-details-dialog');
+    if (this._detailsOpen && detailsDialog && !detailsDialog.open) detailsDialog.showModal();
+    const alertDialog = this.renderRoot.querySelector<HTMLDialogElement>('#stop-alert-dialog');
+    if (this._alertOpen && alertDialog && !alertDialog.open) alertDialog.showModal();
+
     // Compute overlay height to span from top of card (including header) down to just above the first row
     try {
       const list = this.renderRoot.querySelector('.list') as HTMLElement | null;
@@ -345,13 +565,14 @@ export class TrafiklabTimetableCard extends LitElement {
                 const inLabel = min !== undefined ? (min === 0 ? this._t('label.now') : this._t('label.in_minutes', { minutes: min })) : undefined;
                 return html`
                   <div class="row" role="listitem">
-                    <div class="line">
-                      <span class="pill" role="button" tabindex="0"
-                            @click=${() => this._openMoreInfo()}
-                            @keydown=${(e: KeyboardEvent) => this._onKeyActivate(e)}>
+                    <button class="row-action" type="button"
+                            aria-label=${this._t('label.trip_details_for', { line: d.line ?? '', destination: d.destination ?? '' })}
+                            @click=${() => void this._openTripDetails(d)}>
+                    <span class="line">
+                      <span class="pill">
                         ${modeIcon ? html`<ha-icon class="pill-icon" .icon=${modeIcon}></ha-icon>` : nothing}${d.line ?? ''}
                       </span>
-                    </div>
+                    </span>
                     <div class="main">
                       <div class="dest">${d.destination ?? ''}</div>
                       <div class="meta">
@@ -370,6 +591,7 @@ export class TrafiklabTimetableCard extends LitElement {
                             </div>`
                         : nothing}
                     </div>
+                    </button>
                   </div>`;
               })}
             </div>`}
@@ -378,6 +600,117 @@ export class TrafiklabTimetableCard extends LitElement {
           ${entity.attributes?.last_update ? html`<span class="updated">${this._t('label.updated', { time: this._formatUpdated(entity.attributes.last_update) })}</span>` : nothing}
         </div>
         </div>
+        ${this._detailsOpen ? html`
+          <dialog id="trip-details-dialog" class="dialog" aria-labelledby="trip-dialog-title"
+                  @close=${this._onDetailsDialogClose}
+                  @click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeDetailsDialog(); }}>
+            <div class="dialog-header">
+              <div>
+                <div class="dialog-kicker">${this._t('trip.details')}</div>
+                <h2 id="trip-dialog-title">${this._tripDetails?.line ?? this._selectedTrip?.line ?? this._t('trip.title')}</h2>
+                ${this._tripDetails?.headsign || this._selectedTrip?.destination
+                  ? html`<div class="dialog-subtitle">${this._tripDetails?.headsign ?? this._selectedTrip?.destination}</div>`
+                  : nothing}
+              </div>
+              <button class="icon-button" type="button" aria-label=${this._t('label.close')} @click=${this._closeDetailsDialog}>
+                <ha-icon .icon=${'mdi:close'}></ha-icon>
+              </button>
+            </div>
+            ${this._tripLoading
+              ? html`<div class="dialog-state" role="status" aria-live="polite"><span class="spinner"></span>${this._t('trip.loading')}</div>`
+              : nothing}
+            ${this._tripError
+              ? html`<div class="dialog-state error" role="alert">
+                  <p>${this._t(this._tripError)}</p>
+                  ${this._tripError === 'error.trip_details'
+                    ? html`<button class="text-button" type="button" @click=${this._retryTripDetails}>${this._t('label.retry')}</button>`
+                    : nothing}
+                </div>`
+              : nothing}
+            ${this._tripDetails ? html`
+              <div class="route-summary">
+                <span>${this._tripDetails.origin ?? this._t('trip.origin_unknown')}</span>
+                <ha-icon .icon=${'mdi:arrow-right'}></ha-icon>
+                <span>${this._tripDetails.destination ?? this._t('trip.destination_unknown')}</span>
+              </div>
+              ${this._visibleCalls().length === 0
+                ? html`<div class="dialog-state">${this._t('trip.no_stops')}</div>`
+                : html`<ol class="stop-list" aria-label=${this._t('trip.stops')}>
+                ${!this._showPastStops && this._startIndex() > 0
+                  ? html`<li class="stop-row past-toggle-row">
+                      <span class="stop-marker" aria-hidden="true"></span>
+                      <div class="stop-content past-toggle-content">
+                        <button class="past-toggle-button" type="button"
+                                aria-label=${this._t('trip.show_previous_stops')}
+                                title=${this._t('trip.show_previous_stops')}
+                                @click=${this._showPastStopsToggle}>
+                          <ha-icon .icon=${'mdi:dots-horizontal'}></ha-icon>
+                        </button>
+                      </div>
+                    </li>`
+                  : nothing}
+                ${this._visibleCalls().map((call, index, calls) => {
+                  const finalStop = index === calls.length - 1;
+                  const isPast = this._showPastStops && index < this._startIndex();
+                  const time = this._tripTime(call, finalStop);
+                  const platform = this._tripPlatform(call);
+                  const alerts = Array.isArray(call.alerts) ? call.alerts.filter((alert) => alert && (alert.title || alert.text)) : [];
+                  return html`<li class="stop-row ${isPast ? 'past' : ''}">
+                    <span class="stop-marker" aria-hidden="true">
+                      ${call.is_realtime && !isPast ? html`<ha-icon class="realtime-live" .icon=${'mdi:access-point'}></ha-icon>` : nothing}
+                    </span>
+                    <div class="stop-content">
+                      <div class="stop-name">${call.stop?.name ?? this._t('trip.unknown_stop')}</div>
+                      <div class="stop-meta">
+                        <span class="trip-time-label">${isPast ? this._t('trip.departed') : finalStop ? this._t('trip.arrival') : this._t('trip.departure')}</span>
+                        ${isPast
+                          ? html`<span>${time.realtime ?? time.scheduled ?? this._t('trip.time_unavailable')}</span>`
+                          : time.differs
+                            ? html`<span class="scheduled crossed-out">${time.scheduled}</span><span class="realtime-value">${time.realtime}</span>`
+                            : html`<span>${time.realtime ?? time.scheduled ?? this._t('trip.time_unavailable')}</span>`}
+                        ${platform.differs
+                          ? html`<span class="platform-values"><span class="crossed-out">${platform.scheduled}</span><span>${this._t('label.platform', { platform: platform.realtime })}</span></span>`
+                          : (platform.realtime ?? platform.scheduled)
+                            ? html`<span>${this._t('label.platform', { platform: platform.realtime ?? platform.scheduled })}</span>`
+                            : nothing}
+                      </div>
+                    </div>
+                    ${alerts.length
+                      ? html`<button class="icon-button alert-button" type="button"
+                                aria-label=${this._t('alert.button_for_stop', { stop: call.stop?.name ?? this._t('trip.unknown_stop') })}
+                                title=${this._t('alert.button_for_stop', { stop: call.stop?.name ?? this._t('trip.unknown_stop') })}
+                                @click=${() => this._openStopAlerts(call)}>
+                          <ha-icon .icon=${'mdi:information-box-outline'}></ha-icon>
+                        </button>`
+                      : nothing}
+                  </li>`;
+                })}
+              </ol>`}
+            ` : nothing}
+          </dialog>
+        ` : nothing}
+        ${this._alertOpen && this._selectedAlertCall ? html`
+          <dialog id="stop-alert-dialog" class="dialog alert-dialog" aria-labelledby="alert-dialog-title"
+                  @close=${this._onAlertDialogClose}
+                  @click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeAlertDialog(); }}>
+            <div class="dialog-header">
+              <div>
+                <div class="dialog-kicker">${this._t('alert.heading')}</div>
+                <h2 id="alert-dialog-title">${this._selectedAlertCall.stop?.name ?? this._t('trip.unknown_stop')}</h2>
+              </div>
+              <button class="icon-button" type="button" aria-label=${this._t('label.close')} @click=${this._closeAlertDialog}>
+                <ha-icon .icon=${'mdi:close'}></ha-icon>
+              </button>
+            </div>
+            <div class="alert-list">
+              ${(this._selectedAlertCall.alerts ?? []).filter((alert) => alert && (alert.title || alert.text)).map((alert) => html`
+                <article class="alert-item">
+                  ${alert.title ? html`<h3>${alert.title}</h3>` : nothing}
+                  ${alert.text ? html`<p>${alert.text}</p>` : nothing}
+                </article>`)}
+            </div>
+          </dialog>
+        ` : nothing}
       </ha-card>
     `;
   }
@@ -402,14 +735,26 @@ export class TrafiklabTimetableCard extends LitElement {
     .empty { color: var(--secondary-text-color); }
     .list { padding: 8px 8px 0; }
     .row {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 12px;
-      align-items: center;
-      padding: 8px;
+      padding: 0;
       border-bottom: 1px solid var(--divider-color);
     }
     .row:last-child { border-bottom: none; }
+    .row-action {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      width: 100%;
+      padding: 8px;
+      border: 0;
+      color: inherit;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      font: inherit;
+    }
+    .row-action:hover { background: var(--secondary-background-color); }
+    .row-action:focus-visible, .icon-button:focus-visible, .text-button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
     .card-header { padding: 16px; font-size: 1.1em; font-weight: 600; cursor: pointer; }
     .pill {
       display: inline-flex;
@@ -451,6 +796,70 @@ export class TrafiklabTimetableCard extends LitElement {
       padding: 8px 16px 12px;
       color: var(--secondary-text-color);
       font-size: 0.8em;
+    }
+    .dialog {
+      width: min(640px, calc(100vw - 32px));
+      max-width: 640px;
+      max-height: min(82vh, 760px);
+      margin: auto;
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid var(--divider-color);
+      border-radius: 8px;
+      color: var(--primary-text-color);
+      background: var(--card-background-color, var(--ha-card-background, white));
+      box-shadow: 0 12px 40px rgb(0 0 0 / 24%);
+    }
+    .dialog::backdrop { background: rgb(0 0 0 / 45%); }
+    .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 22px 16px; border-bottom: 1px solid var(--divider-color); }
+    .dialog-kicker { color: var(--secondary-text-color); font-size: 0.76em; font-weight: 600; text-transform: uppercase; }
+    .dialog-header h2 { margin: 4px 0 0; font-size: 1.3em; line-height: 1.25; }
+    .dialog-subtitle { margin-top: 4px; color: var(--secondary-text-color); }
+    .icon-button { display: inline-grid; place-items: center; flex: 0 0 40px; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; color: var(--primary-text-color); background: transparent; cursor: pointer; }
+    .icon-button:hover { background: var(--secondary-background-color); }
+    .icon-button ha-icon { --mdc-icon-size: 22px; }
+    .dialog-state { display: flex; align-items: center; gap: 12px; padding: 22px; color: var(--secondary-text-color); }
+    .dialog-state.error { display: block; color: var(--error-color); }
+    .dialog-state p { margin: 0 0 12px; }
+    .spinner { width: 18px; height: 18px; border: 2px solid var(--divider-color); border-top-color: var(--primary-color); border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .text-button { padding: 8px 0; border: 0; color: var(--primary-color); background: transparent; font: inherit; font-weight: 600; cursor: pointer; }
+    .route-summary { display: flex; align-items: center; gap: 10px; padding: 14px 22px; color: var(--secondary-text-color); background: var(--secondary-background-color); font-weight: 600; }
+    .route-summary span { min-width: 0; overflow-wrap: anywhere; }
+    .route-summary ha-icon { flex: 0 0 auto; --mdc-icon-size: 18px; }
+    .stop-list { max-height: min(58vh, 520px); margin: 0; padding: 12px 16px 18px 22px; overflow: auto; list-style: none; }
+    .stop-row { position: relative; display: grid; grid-template-columns: 24px minmax(0, 1fr) 40px; gap: 10px; align-items: center; min-height: 64px; }
+    .stop-row:not(:last-child)::before { position: absolute; z-index: 0; top: 30px; bottom: -30px; left: 11px; width: 2px; background: var(--divider-color); content: ''; }
+    .stop-marker { z-index: 1; display: grid; place-items: center; width: 24px; height: 24px; border: 2px solid var(--primary-color); border-radius: 50%; background: var(--card-background-color); }
+    .stop-content { min-width: 0; padding: 9px 0; }
+    .stop-row.past { opacity: 0.6; }
+    .stop-name { font-weight: 600; overflow-wrap: anywhere; }
+    .stop-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 9px; margin-top: 3px; color: var(--secondary-text-color); font-size: 0.88em; }
+    .trip-time-label { color: var(--primary-text-color); font-weight: 600; }
+    .realtime-value { color: var(--primary-text-color); font-weight: 700; }
+    .crossed-out { text-decoration: line-through; opacity: 0.72; }
+    .platform-values { display: inline-flex; gap: 6px; }
+    .alert-button { color: var(--primary-color); }
+    .alert-button ha-icon { --mdc-icon-size: 24px; }
+    .realtime-live { display: block; color: var(--primary-color); --mdc-icon-size: 16px; animation: pulse-live 1.6s ease-in-out infinite; }
+    @keyframes pulse-live { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.8); } }
+    .past-toggle-row { min-height: 40px; }
+    .past-toggle-content { display: flex; justify-content: center; padding: 4px 0; }
+    .past-toggle-button { display: inline-flex; align-items: center; justify-content: center; padding: 4px 18px; border: 0; border-radius: 999px; background: var(--secondary-background-color); color: var(--secondary-text-color); cursor: pointer; }
+    .past-toggle-button:hover { background: var(--divider-color); }
+    .past-toggle-button ha-icon { --mdc-icon-size: 20px; }
+    .alert-dialog { width: min(480px, calc(100vw - 32px)); }
+    .alert-list { max-height: min(60vh, 520px); padding: 6px 22px 20px; overflow: auto; }
+    .alert-item { padding: 12px 0; border-bottom: 1px solid var(--divider-color); }
+    .alert-item:last-child { border-bottom: 0; }
+    .alert-item h3 { margin: 0 0 6px; font-size: 1em; }
+    .alert-item p { margin: 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 440px) {
+      .dialog-header { padding: 16px; }
+      .route-summary { padding: 12px 16px; font-size: 0.9em; }
+      .stop-list { padding: 8px 12px 16px 16px; }
+      .alert-list { padding-inline: 16px; }
+      .row-action { gap: 8px; }
     }
   `;
 }

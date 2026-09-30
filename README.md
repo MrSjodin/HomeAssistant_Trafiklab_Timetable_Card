@@ -8,12 +8,13 @@ A Home Assistant Lovelace card that shows upcoming departures from a Trafiklab t
 - Shows type, line, destination, time, minutes until departure, and status (on time / delayed / cancelled)
 - Shows the Platform/Stand/Bay where the service departures from or arrives to
 - Real-time indicator (RT) when applicable
+- Click a departure to view its full route, including stop alerts when available
 - Configurable number of items, optional heading
 - English and Swedish translations
 
 ## Requirements
 - Home Assistant 2024.1+ (tested)
-- [Trafiklab Integration](https://github.com/MrSjodin/HomeAssistant_Trafiklab_Integration) 0.4.6+
+- [Trafiklab Integration](https://github.com/MrSjodin/HomeAssistant_Trafiklab_Integration) 1.1.1+ for trip details (basic timetable display supports 0.4.6+)
 
 ## Installation
 
@@ -58,6 +59,7 @@ The card supports two formats:
 
 1) Array format (preferred): `sensor.attributes.upcoming` is a list of departures, where each item may include:
 - `line`, `destination`, `scheduled_time`, `expected_time`, `time_formatted`, `minutes_until`, `transport_mode`, `real_time`, `delay_minutes`/`delay`, `canceled`, `platform`, `agency`
+- `trip_id` and `trip_start_date` (required to load route details on click)
 
 2) Single-trip format: Card will map base attributes from the entity itself if `upcoming` is not an array.
 
@@ -70,6 +72,7 @@ The card supports two formats:
   - Stand: bus, taxi, tram
   - Bay: boat
 - Icons: Based on `transport_mode` (mdi icons).
+- Trip details: Calls `trafiklab.trip_details` on selection; requires integration 1.1.1+ and trip identifiers in the departure. Stop alerts from the service response appear under the affected stop and open in a dialog.
 
 ## Accessibility
 - Header overlay and line pill are keyboard-activatable (Enter/Space) to open more-info.
